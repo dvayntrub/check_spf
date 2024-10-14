@@ -1,0 +1,87 @@
+#!/bin/bash
+#8/6/2024: Generated with MS Copilot, reviewed/corrected by Dmitry Vayntrub
+#The script is used to check that the number of the lookup mechanisms for SFP record does not exceed the limit of 10 
+#V1.00
+
+# Nagios exit codes
+STATE_OK=0
+STATE_WARNING=1
+STATE_CRITICAL=2
+STATE_UNKNOWN=3
+
+# Initialize variables
+domain=""
+dns_server=""
+
+# Function to print usage
+usage() {
+    echo "Usage: $0 -d <domain> -s <dns_server>"
+    exit $STATE_UNKNOWN
+}
+
+# Function to count DNS lookups in SPF record
+count_lookups() {
+    local record=$1
+    local -i count=0
+
+    # Count mechanisms that require DNS lookups
+    count+=$(grep -o 'include:' <<< "$record" | wc -l)
+    count+=$(grep -o 'a:' <<< "$record" | wc -l)
+    count+=$(grep -o 'mx:' <<< "$record" | wc -l)
+    count+=$(grep -o 'ptr:' <<< "$record" | wc -l)
+    count+=$(grep -o 'exists:' <<< "$record" | wc -l)
+    count+=$(grep -o 'redirect=' <<< "$record" | wc -l)
+
+    # Parse include statements
+    local includes=$(grep -oP 'include:\K\S+' <<< "$record")
+    for include in $includes; do
+        local included_record=$(dig +short txt $include @$dns_server | grep 'v=spf1')
+        if [ -n "$included_record" ]; then
+            count+=$(count_lookups "$included_record")
+        fi
+    done
+
+    echo $count
+}
+
+# Parse command-line arguments
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        -d|--domain) domain="$2"; shift ;;
+        -s|--server) dns_server="$2"; shift ;;
+        *) usage ;;
+    esac
+    shift
+done
+
+# Check if domain and dns_server are provided
+if [ -z "$domain" ] || [ -z "$dns_server" ]; then
+    usage
+fi
+
+# Get the SPF record for the domain using the specified DNS server
+spf_record=$(dig +short txt $domain @$dns_server | grep 'v=spf1')
+
+# Check if the SPF record exists
+if [ -z "$spf_record" ]; then
+    echo "SPF record not found for $domain."
+    exit $STATE_WARNING
+else
+    # Validate the SPF record syntax
+    if echo $spf_record | grep -q 'v=spf1'; then
+        # Validate the SPF record for DNS lookup limit
+        lookup_count=$(count_lookups "$spf_record")
+        if [ $lookup_count -le 10 ]; then
+            echo "SPF record for $domain has count of $lookup_count lookups and is within the 10 DNS lookup limit"
+            echo "SPF record found for $domain: $spf_record"
+            exit $STATE_OK
+        else
+            echo "SPF record for $domain has count of $lookup_count lookups and exceeds the 10 DNS lookup limit"
+    	    echo "SPF record found for $domain: $spf_record"
+            exit $STATE_CRITICAL
+        fi
+    else
+        echo "SPF record syntax for $domain is invalid"
+        exit $STATE_CRITICAL
+    fi
+fi
